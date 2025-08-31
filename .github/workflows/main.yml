@@ -31,8 +31,7 @@ jobs:
 
       - name: Create RDP User with Fixed Password
         run: |
-          $password = "lishere"
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          $securePass = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
           
           if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
               New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
