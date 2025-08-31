@@ -1,0 +1,45 @@
+name: Windows-RDP-KaliReady
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Enable RDP
+        run: |
+          net user kaliuser "rdppassword123" /add
+          net localgroup administrators kaliuser /add
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+      - name: Install VirtualBox
+        run: |
+          Invoke-WebRequest -Uri "https://download.virtualbox.org/virtualbox/7.0.20/VirtualBox-7.0.20-163906-Win.exe" -OutFile vbox.exe
+          Start-Process vbox.exe -ArgumentList "/S" -Wait
+
+      - name: Download Kali Prebuilt VM
+        run: |
+          Invoke-WebRequest -Uri "https://cdimage.kali.org/kali-2024.2/kali-linux-2024.2-virtualbox-amd64.ova" -OutFile kali.ova
+
+      - name: Import Kali VM
+        run: |
+          & "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" import kali.ova --vsys 0 --vmname "Kali-Linux"
+          & "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" modifyvm "Kali-Linux" --memory 4096 --vram 128 --nic1 nat
+
+      - name: Show Connection Info
+        run: |
+          ipconfig
+          echo "=============================="
+          echo "RDP User: kaliuser"
+          echo "Password: rdppassword123"
+          echo "Kali VM is ready inside VirtualBox"
+          echo "=============================="
+
+      - name: Keep Session Alive
+        run: |
+          while ($true) { Write-Output "[$(Get-Date)] Session Active"; Start-Sleep -Seconds 300 }
