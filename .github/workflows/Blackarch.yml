@@ -1,40 +1,89 @@
-name: BlackArch-RDP
+name: BlackArch-RDP-VNC
 
 on:
   workflow_dispatch:
 
 jobs:
-  blackarch-rdp:
+  blackarch-rdp-vnc:
     runs-on: ubuntu-latest
     timeout-minutes: 3600
 
     steps:
-      - name: Start BlackArch with Desktop + RDP
+      - name: Start BlackArch with Desktop + RDP + VNC
         run: |
-          docker run -d --name blackarch-rdp -p 3389:3389 blackarchlinux/blackarch sleep infinity
+          docker run -d --name blackarch -p 3389:3389 -p 5901:5901 blackarchlinux/blackarch sleep infinity
           
-          # تثبيت سطح المكتب + RDP + أدوات إضافية
-          docker exec blackarch-rdp bash -c "
+          # تحديث وتثبيت الأدوات الأساسية
+          docker exec blackarch bash -c "
             pacman -Sy --noconfirm && \
-            pacman -S --noconfirm xrdp xfce4 xorg xterm firefox thunar terminator sudo tailscale
+            pacman -S --noconfirm xrdp tigervnc xfce4 xorg xterm firefox thunar terminator sudo tailscale
           "
-          
-          # إنشاء المستخدم
-          docker exec blackarch-rdp bash -c "
+
+          # إنشاء مستخدم مشترك
+          docker exec blackarch bash -c "
             useradd -m -s /bin/bash rdp && \
             echo 'rdp:lishere' | chpasswd && \
             echo 'rdp ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
           "
-          
-          # تفعيل الجلسة الرسومية
-          docker exec blackarch-rdp bash -c "
+
+          # تفعيل جلسة XFCE للمستخدم
+          docker exec blackarch bash -c "
             echo 'xfce4-session' > /home/rdp/.xsession && \
             chown rdp:rdp /home/rdp/.xsession && \
             chmod +x /home/rdp/.xsession
           "
-          
-          # تشغيل خدمة RDP
-          docker exec blackarch-rdp bash -c "
+
+          # إعداد VNC
+          docker exec -u rdp blackarch bash -c "
+            mkdir -p /home/rdp/.vnc && \
+            echo 'lishere' | vncpasswd -f > /home/rdp/.vnc/passwd && \
+            chmod 600 /home/rdp/.vnc/passwd && \
+            echo '#!/bin/bash\nstartxfce4 &' > /home/rdp/.vnc/xstartup && \
+            chmod +x /home/rdp/.vnc/xstartup
+          "
+
+          # تشغيل XRDP
+          docker exec blackarch bash -c "
+            /usr/bin/xrdp-sesman &
+            /usr/bin/xrdp -nodaemon &
+          " &
+
+          # تشغيل VNC
+          docker exec -d -u rdp blackarch bash -c "
+            vncserver :1 -geometry 1280x720 -depth 24
+          "
+
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+
+      - name: Connect Tailscale
+        run: |
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=blackarch-${{ github.run_id }}
+          TS_IP=$(tailscale ip -4 | head -n1)
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: Verify Connectivity
+        run: |
+          echo "Tailscale IP: $TAILSCALE_IP"
+          nc -zv $TAILSCALE_IP 3389 || echo '⚠️ RDP port not open'
+          nc -zv $TAILSCALE_IP 5901 || echo '⚠️ VNC port not open'
+
+      - name: Maintain Session
+        run: |
+          echo "=== BLACKARCH REMOTE ACCESS ==="
+          echo "Address (Tailscale): $TAILSCALE_IP"
+          echo "Username: rdp"
+          echo "Password: lishere"
+          echo "--- RDP ---"
+          echo "Use Microsoft Remote Desktop → $TAILSCALE_IP:3389"
+          echo "--- VNC ---"
+          echo "Use any VNC Viewer → $TAILSCALE_IP:5901"
+          echo "================================"
+          while true; do
+            echo "[$(date)] BlackArch Session Active"
+            sleep 300
+          done          docker exec blackarch-rdp bash -c "
             /usr/bin/xrdp-sesman &
             /usr/bin/xrdp -nodaemon &
           " &
