@@ -1,0 +1,68 @@
+name: BlackArch-RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  blackarch-rdp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Start BlackArch with Desktop + RDP
+        run: |
+          # Run BlackArch container with port 3389 exposed
+          docker run -d --name blackarch-rdp -p 3389:3389 blackarchlinux/blackarch sleep infinity
+
+          # Install required packages inside container
+          docker exec blackarch-rdp bash -c "
+            pacman -Sy --noconfirm && \
+            pacman -S --noconfirm xrdp xfce4 sudo tailscale
+          "
+
+          # Create RDP user with fixed password
+          docker exec blackarch-rdp bash -c "
+            useradd -m -s /bin/bash rdp && \
+            echo 'rdp:lishere' | chpasswd && \
+            echo 'rdp ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+          "
+
+          # Enable XRDP with XFCE session
+          docker exec blackarch-rdp bash -c "
+            echo 'xfce4-session' > /home/rdp/.xsession && \
+            chmod +x /home/rdp/.xsession
+          "
+
+          # Start XRDP service
+          docker exec blackarch-rdp bash -c "
+            /usr/bin/xrdp-sesman &
+            /usr/bin/xrdp -nodaemon &
+          " &
+
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+
+      - name: Connect Tailscale
+        run: |
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=blackarch-${{ github.run_id }}
+
+          TS_IP=$(tailscale ip -4 | head -n1)
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: Verify RDP Connectivity
+        run: |
+          echo "Tailscale IP: $TAILSCALE_IP"
+          nc -zv $TAILSCALE_IP 3389 || (echo 'RDP port not open' && exit 1)
+
+      - name: Maintain Session
+        run: |
+          echo "=== BLACKARCH RDP ACCESS ==="
+          echo "Address: $TAILSCALE_IP"
+          echo "Username: rdp"
+          echo "Password: lishere"
+          echo "============================"
+          while true; do
+            echo "[$(date)] BlackArch RDP Active"
+            sleep 300
+          done
