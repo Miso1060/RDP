@@ -1,4 +1,4 @@
-name: Kali-RDP
+name: Kali-RDP-Tailscale
 
 on:
   workflow_dispatch:
@@ -6,55 +6,74 @@ on:
 jobs:
   kali-rdp:
     runs-on: ubuntu-latest
-    container:
-      image: kalilinux/kali-rolling
-    timeout-minutes: 1440
+    timeout-minutes: 3600  # GitHub سيوقف بعد 6 ساعات كحد أقصى على أي حال
 
     steps:
-      - name: Update & Install Desktop + RDP
+      - name: Start Kali container (publish RDP port)
         run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xrdp xfce4 xfce4-goodies dbus-x11 x11-xserver-utils \
-            curl wget sudo
+          docker rm -f kali-rdp >/dev/null 2>&1 || true
+          docker pull kalilinux/kali-rolling
+          docker run -d --name kali-rdp -p 3389:3389 kalilinux/kali-rolling sleep infinity
 
-          # إنشاء مستخدم للدخول
-          useradd -m -s /bin/bash rdpuser
-          echo "rdpuser:Password123!" | chpasswd
-          adduser rdpuser sudo
+      - name: Install Desktop & XRDP inside container
+        run: |
+          docker exec kali-rdp bash -lc '
+            set -e
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y \
+              xrdp xfce4 xfce4-goodies xorgxrdp dbus-x11 x11-xserver-utils sudo curl wget vim
 
-          # إعداد سطح المكتب الافتراضي
-          echo "xfce4-session" > /home/rdpuser/.xsession
-          chown rdpuser:rdpuser /home/rdpuser/.xsession
+            # مستخدم RDP
+            useradd -m -s /bin/bash rdp
+            echo "rdp:lishere" | chpasswd
+            usermod -aG sudo rdp
 
-          # تشغيل خدمة RDP
-          service xrdp restart
+            # جلسة XFCE
+            echo "xfce4-session" > /home/rdp/.xsession
+            chown rdp:rdp /home/rdp/.xsession
+            chmod 644 /home/rdp/.xsession
 
-      - name: Install Tailscale
+            # ضمان تشغيل XFCE عند الاتصال
+            sed -i "s|^test -x /etc/X11/Xsession.*|startxfce4|" /etc/xrdp/startwm.sh || true
+
+            # تشغيل xrdp بدون systemd
+            nohup /usr/sbin/xrdp-sesman >/var/log/xrdp-sesman.log 2>&1 &
+            nohup /usr/sbin/xrdp       >/var/log/xrdp.log        2>&1 &
+
+            # انتظر حتى يفتح البورت 3389 داخل الحاوية
+            for i in $(seq 1 30); do
+              ss -ltn | grep -q ":3389 " && break
+              sleep 1
+            done
+          '
+
+      - name: Install & Bring up Tailscale on host (no systemd)
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
-          # تشغيل tailscaled بالخلفية بدون systemd
-          nohup tailscaled > /dev/null 2>&1 &
-
-      - name: Connect to Tailscale
-        run: |
-          tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=kali-rdp-${{ github.run_id }}
-          TS_IP=$(tailscale ip -4 | head -n 1)
+          # شغّل daemon بالخلفية بدون systemd
+          nohup sudo tailscaled >/dev/null 2>&1 &
+          # اعطيه ثانية يجهز
+          sleep 2
+          # اتصال
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=kali-rdp-${{ github.run_id }}
+          TS_IP=$(tailscale ip -4 | head -n1)
+          if [ -z "$TS_IP" ]; then
+            echo "Tailscale IP not assigned"; exit 1
+          fi
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
 
-      - name: Show RDP Credentials
+      - name: Verify XRDP reachable via Tailscale
         run: |
-          echo "=============================="
-          echo "✅ Kali RDP is ready!"
-          echo "Connect with:"
-          echo "Address: $TAILSCALE_IP:3389"
-          echo "Username: rdpuser"
-          echo "Password: Password123!"
-          echo "=============================="
-          
-      - name: Keep alive
-        run: |
-          while true; do
-            echo "[$(date)] RDP running..."
-            sleep 300
+          echo "Tailscale IP: $TAILSCALE_IP"
+          # نتأكد أن البورت 3389 مفتوح على المضيف (محوّل للحاوية)
+          for i in $(seq 1 30); do
+            nc -z 127.0.0.1 3389 && break || sleep 1
           done
+          nc -zv 127.0.0.1 3389
+
+      - name: Show connection info
+        run: |
+          echo "======================================="
+          echo "✅ Kali RDP is ready via Tailscale"
+          echo "Address : $TAILSCALE_IP:3389"
+          echo "Username: r
