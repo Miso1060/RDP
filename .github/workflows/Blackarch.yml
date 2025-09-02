@@ -71,9 +71,12 @@ jobs:
           done
           nc -zv 127.0.0.1 3389
 
-      - name: Show connection info
+- name: Show connection info
         run: |
           echo "======================================="
           echo "✅ Kali RDP is ready via Tailscale"
           echo "Address : $TAILSCALE_IP:3389"
-          echo "Username: r
+          echo "Username: rdp"
+          echo "Password: lishere"
+          echo "Desktop : XFCE"
+          echo "======================================="
