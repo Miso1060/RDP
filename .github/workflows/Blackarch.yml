@@ -1,147 +1,102 @@
-name: BlackArch-RDP-VNC
+name: RDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  blackarch-rdp-vnc:
+  secure-rdp:
     runs-on: ubuntu-latest
-    timeout-minutes: 3600
+    container:
+      image: kalilinux/kali-rolling
+    timeout-minutes: 1440
 
     steps:
-      - name: Start BlackArch with Desktop + RDP + VNC
+      - name: Configure Core RDP Settings
         run: |
-          docker run -d --name blackarch -p 3389:3389 -p 5901:5901 blackarchlinux/blackarch sleep infinity
+          # Enable Remote Desktop and disable Network Level Authentication (if needed)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
+
+          # Remove any existing rule with the same name to avoid duplication
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
           
-          # تحديث وتثبيت الأدوات الأساسية
-          docker exec blackarch bash -c "
-            pacman -Sy --noconfirm && \
-            pacman -S --noconfirm xrdp tigervnc xfce4 xorg xterm firefox thunar terminator sudo tailscale
-          "
+          # Allow incoming RDP on port 3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
 
-          # إنشاء مستخدم مشترك
-          docker exec blackarch bash -c "
-            useradd -m -s /bin/bash rdp && \
-            echo 'rdp:lishere' | chpasswd && \
-            echo 'rdp ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
-          "
+          # Restart the Remote Desktop service
+          Restart-Service -Name TermService -Force
 
-          # تفعيل جلسة XFCE للمستخدم
-          docker exec blackarch bash -c "
-            echo 'xfce4-session' > /home/rdp/.xsession && \
-            chown rdp:rdp /home/rdp/.xsession && \
-            chmod +x /home/rdp/.xsession
-          "
+      - name: Create RDP User with Fixed Password
+        run: |
+          $password = "l1shere!"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          } else {
+              Write-Host "User 'RDP' already exists, updating password..."
+              Set-LocalUser -Name "RDP" -Password $securePass
+          }
 
-          # إعداد VNC
-          docker exec -u rdp blackarch bash -c "
-            mkdir -p /home/rdp/.vnc && \
-            echo 'lishere' | vncpasswd -f > /home/rdp/.vnc/passwd && \
-            chmod 600 /home/rdp/.vnc/passwd && \
-            echo '#!/bin/bash\nstartxfce4 &' > /home/rdp/.vnc/xstartup && \
-            chmod +x /home/rdp/.vnc/xstartup
-          "
-
-          # تشغيل XRDP
-          docker exec blackarch bash -c "
-            /usr/bin/xrdp-sesman &
-            /usr/bin/xrdp -nodaemon &
-          " &
-
-          # تشغيل VNC
-          docker exec -d -u rdp blackarch bash -c "
-            vncserver :1 -geometry 1280x720 -depth 24
-          "
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP" -ErrorAction SilentlyContinue
+          
+          echo "RDP_USER=RDP" >> $env:GITHUB_ENV
+          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
         run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
 
-      - name: Connect Tailscale
+      - name: Establish Tailscale Connection
         run: |
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=blackarch-${{ github.run_id }}
-          TS_IP=$(tailscale ip -4 | head -n1)
-          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-
-      - name: Verify Connectivity
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          
+          # Wait for Tailscale to assign an IP
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+      
+      - name: Verify RDP Accessibility
         run: |
-          echo "Tailscale IP: $TAILSCALE_IP"
-          nc -zv $TAILSCALE_IP 3389 || echo '⚠️ RDP port not open'
-          nc -zv $TAILSCALE_IP 5901 || echo '⚠️ VNC port not open'
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
 
-      - name: Maintain Session
+      - name: Maintain Connection
         run: |
-          echo "=== BLACKARCH REMOTE ACCESS ==="
-          echo "Address (Tailscale): $TAILSCALE_IP"
-          echo "Username: rdp"
-          echo "Password: lishere"
-          echo "--- RDP ---"
-          echo "Use Microsoft Remote Desktop → $TAILSCALE_IP:3389"
-          echo "--- VNC ---"
-          echo "Use any VNC Viewer → $TAILSCALE_IP:5901"
-          echo "================================"
-          while true; do
-            echo "[$(date)] BlackArch Session Active"
-            sleep 300
-          done          docker exec blackarch-rdp bash -c "
-            /usr/bin/xrdp-sesman &
-            /usr/bin/xrdp -nodaemon &
-          " &
-
-      - name: Install Tailscale
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
-
-      - name: Connect Tailscale
-        run: |
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=blackarch-${{ github.run_id }}
-          TS_IP=$(tailscale ip -4 | head -n1)
-          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-
-      - name: Verify RDP Connectivity
-        run: |
-          echo "Tailscale IP: $TAILSCALE_IP"
-          nc -zv $TAILSCALE_IP 3389 || (echo 'RDP port not open' && exit 1)
-
-      - name: Maintain Session
-        run: |
-          echo "=== BLACKARCH RDP ACCESS ==="
-          echo "Address: $TAILSCALE_IP"
-          echo "Username: rdp"
-          echo "Password: lishere"
-          echo "============================"
-          while true; do
-            echo "[$(date)] BlackArch RDP Active"
-            sleep 300
-          done    docker exec blackarch-rdp bash -c "
-      /usr/bin/xrdp-sesman &
-      /usr/bin/xrdp -nodaemon &
-    " &
-
-      - name: Install Tailscale
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
-
-      - name: Connect Tailscale
-        run: |
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=blackarch-${{ github.run_id }}
-
-          TS_IP=$(tailscale ip -4 | head -n1)
-          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-
-      - name: Verify RDP Connectivity
-        run: |
-          echo "Tailscale IP: $TAILSCALE_IP"
-          nc -zv $TAILSCALE_IP 3389 || (echo 'RDP port not open' && exit 1)
-
-      - name: Maintain Session
-        run: |
-          echo "=== BLACKARCH RDP ACCESS ==="
-          echo "Address: $TAILSCALE_IP"
-          echo "Username: rdp"
-          echo "Password: lishere"
-          echo "============================"
-          while true; do
-            echo "[$(date)] BlackArch RDP Active"
-            sleep 300
-          done
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: $env:RDP_USER"
+          Write-Host "Password: $env:RDP_PASS"
+          Write-Host "==================`n"
+          
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
+          }
