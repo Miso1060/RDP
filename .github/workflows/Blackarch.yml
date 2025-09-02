@@ -33,7 +33,8 @@ jobs:
       - name: Install Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
-          tailscaled &
+          # تشغيل tailscaled بالخلفية بدون systemd
+          nohup tailscaled > /dev/null 2>&1 &
 
       - name: Connect to Tailscale
         run: |
