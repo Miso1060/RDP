@@ -1,45 +1,76 @@
-name: Windows-RDP-KaliReady
+name: Linux
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: windows-latest
-    timeout-minutes: 3600
+  secure-rdp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1440
 
     steps:
-      - name: Enable RDP
+      - name: Configure Core RDP Settings
         run: |
-          net user kaliuser "rdppassword123" /add
-          net localgroup administrators kaliuser /add
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          sudo apt-get update
+          sudo apt-get install -y xrdp xfce4 xfce4-goodies
+          
+          # Enable XRDP service
+          sudo systemctl enable xrdp
+          sudo systemctl start xrdp
+          
+          # Allow RDP traffic on port 3389
+          sudo ufw allow 3389/tcp || true
 
-      - name: Install VirtualBox
+      - name: Create RDP User with Fixed Password
         run: |
-          Invoke-WebRequest -Uri "https://download.virtualbox.org/virtualbox/7.0.20/VirtualBox-7.0.20-163906-Win.exe" -OutFile vbox.exe
-          Start-Process vbox.exe -ArgumentList "/S" -Wait
+          USER="rdpuser"
+          PASS="l1shere!"
+          
+          if id "$USER" &>/dev/null; then
+              echo "User $USER already exists, updating password..."
+              echo "$USER:$PASS" | sudo chpasswd
+          else
+              sudo useradd -m -s /bin/bash "$USER"
+              echo "$USER:$PASS" | sudo chpasswd
+              sudo usermod -aG sudo "$USER"
+          fi
+          
+          echo "RDP_USER=$USER" >> $GITHUB_ENV
+          echo "RDP_PASS=$PASS" >> $GITHUB_ENV
 
-      - name: Download Kali Prebuilt VM
+      - name: Install Tailscale
         run: |
-          Invoke-WebRequest -Uri "https://cdimage.kali.org/kali-2024.2/kali-linux-2024.2-virtualbox-amd64.ova" -OutFile kali.ova
+          curl -fsSL https://tailscale.com/install.sh | sh
 
-      - name: Import Kali VM
+      - name: Establish Tailscale Connection
         run: |
-          & "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" import kali.ova --vsys 0 --vmname "Kali-Linux"
-          & "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" modifyvm "Kali-Linux" --memory 4096 --vram 128 --nic1 nat
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-${GITHUB_RUN_ID}
+          
+          # Get Tailscale IP
+          tsIP=$(tailscale ip -4 | head -n 1)
+          if [ -z "$tsIP" ]; then
+              echo "Tailscale IP not assigned. Exiting."
+              exit 1
+          fi
+          echo "TAILSCALE_IP=$tsIP" >> $GITHUB_ENV
 
-      - name: Show Connection Info
+      - name: Verify RDP Accessibility
         run: |
-          ipconfig
-          echo "=============================="
-          echo "RDP User: kaliuser"
-          echo "Password: rdppassword123"
-          echo "Kali VM is ready inside VirtualBox"
-          echo "=============================="
+          echo "Tailscale IP: $TAILSCALE_IP"
+          nc -zv $TAILSCALE_IP 3389 || (echo "TCP connection to RDP port 3389 failed" && exit 1)
+          echo "TCP connectivity successful!"
 
-      - name: Keep Session Alive
+      - name: Maintain Connection
         run: |
-          while ($true) { Write-Output "[$(Get-Date)] Session Active"; Start-Sleep -Seconds 300 }
+          echo ""
+          echo "=== RDP ACCESS ==="
+          echo "Address: $TAILSCALE_IP"
+          echo "Username: $RDP_USER"
+          echo "Password: $RDP_PASS"
+          echo "=================="
+          echo ""
+          
+          while true; do
+              echo "[$(date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              sleep 300
+          done
